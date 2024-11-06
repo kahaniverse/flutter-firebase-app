@@ -1,0 +1,197 @@
+# directive @length(min: Int, max: Int) on FIELD_DEFINITION
+# directive @regex(expression: String!) on FIELD_DEFINITION
+
+#ID across models must not collide. Assuming util.autoId creates UUID that do not collide even across tables
+
+interface Post {
+  id: ID!
+  createdBy:ID!
+  # reactors: [Reactions] @connection(keyName: "byPost", fields: ["id"])
+}
+
+enum REACTION {
+  VIEW
+  LOVE
+  FOLLOW
+}
+
+type Reactions 
+  @model(queries: null)
+  @auth(rules: [
+    { allow: public, operations: [read], provider: iam }
+    { allow: owner, ownerField: "profileId", operations: [create, delete] } #public can read and update (required for count increment)
+  ])
+  @key(name: "byPost", fields: ["postId", "type", "profileId"], queryField: "reactionsByPost") #use #META# instead of profileId to get count
+  @key(name: "byProfile", fields: ["profileId", "postId", "type"], queryField: "reactionsByProfile") {
+  id: ID!
+  postId: ID!
+  type: REACTION!
+  profileId: ID! #should be an ADMIN user in case of count
+  reactor: Profile @connection(fields: ["profileId"]) #not available in case of count
+  #only one of below should be present per record
+  count: Int
+  universe: Universe @connection(fields: ["postId"])
+  story: Story @connection(fields: ["postId"])
+  page: Page @connection(fields: ["postId"])
+  character: Character @connection(fields: ["postId"])
+  comment: Comment @connection(fields: ["postId"])
+  profile: Profile @connection(fields: ["postId"])
+}
+
+type Profile
+  @model
+  @key(fields: ["createdBy"]) 
+  @auth(rules: [
+    { allow: owner, ownerField: "createdBy", operations: [read, create, update] } #owner is id so should not be autoId
+  ]) {
+  id: ID
+  createdBy: ID!
+  dob: AWSDate
+  images: [String] #S3 links. TODO should be a set of unique entries
+  name: String
+  reactors: [Reactions] @connection(keyName: "byPost", fields: ["createdBy"])
+  reactions: [Reactions] @connection(keyName: "byProfile", fields: ["createdBy"])
+  # blocked: [Profile] 
+  #authorship
+  universes: [Universe] @connection(keyName: "byCreator", fields: ["createdBy"])
+  stories: [Story] @connection(keyName: "byCreator", fields: ["createdBy"])
+  pages: [Page] @connection(keyName: "byCreator", fields: ["createdBy"]) #this is needed to list those pages where story is not created by the same person
+  characters: [Character] @connection(keyName: "byCreator", fields: ["createdBy"])
+  comments: [Comment] @connection(keyName: "byCreator", fields: ["createdBy"])
+}
+
+#Universe is similar to a Series
+type Universe implements Post 
+  @model 
+  @key(name: "byCreator", fields: ["createdBy"], queryField: "universeByCreator") 
+  @auth(rules: [
+    { allow: public, operations: [read], provider: iam }
+    { allow: owner, ownerField: "createdBy", operations: [create, update, delete] } #we can move this to paid group auth later
+  ]){
+  id: ID!
+  name: String! #@length(max: 16), TODO needs to be unique
+  concept: String!
+  createdBy: ID!
+  # creator: Profile @connection(fields: ["createdBy"])
+  coverImage: String! #S3 link
+  era: String
+  world: String
+  genres: [String] #this is for info only not search. Search is enabled in Story
+  # stories: [Story] @connection(keyName: "byUniverse", fields: ["id"])
+  # characters: [Character] @connection(keyName: "byUniverse", fields: ["id"])
+  # reactors: [Reactions] @connection(keyName: "byPost", fields: ["id"])
+}
+
+#Story is similar to an Episode
+type Story implements Post 
+  @model 
+  @key(name: "byUniverse", fields: ["universeId"]) 
+  @key(name: "byCreator", fields: ["createdBy"]) 
+  @key(name: "byGenre", fields: ["genreTags"]) 
+  @auth(rules: [
+    { allow: public, operations: [read], provider: iam }
+    { allow: owner, ownerField: "createdBy", operations: [create, update, delete] },
+    { allow: owner, ownerField: "contributors", operations: [update] }
+  ]){
+  id: ID!
+  createdBy: ID!
+  creator: Profile @connection(fields: ["createdBy"])
+  title: String! #@length(max: 16)
+  synopsis: String!
+  coverImage: String #S3 link
+  genreTags: [String] #genre or tags
+  contributors: [String!] # Accepted Page authors other than creator can be listed as contributors. Non accepted/Fan pages authors not listed here
+  universeId: ID! #single universe only. Crossovers can be added as a separate universe
+  universe: Universe @connection(fields: ["universeId"])
+  firstPage: [Page] @connection(keyName: "byParent", fields: ["id"])
+  characters: [StoryCharacter] @connection(keyName: "byStory", fields: ["id"])
+  reactors: [Reactions] @connection(keyName: "byPost", fields: ["id"])
+}
+
+#only used for UI options
+type GenreTag
+  @model
+  @key(fields: ["name"])
+  @auth(rules: [
+    { allow: public, operations: [read], provider: iam }
+    { allow: owner, operations: [create, update] }
+  ]){
+    id: ID!
+    name: String!
+    isGenre: Boolean
+}
+
+#Page is similar to a Scene. You can have a tree of alternate scenes
+type Page implements Post 
+  @model 
+  @key(name: "byParent", fields: ["parentId", "id"])
+  @key(name: "byCreator", fields: ["createdBy"]) 
+  @auth(rules: [
+    { allow: public, operations: [read], provider: iam }
+    { allow: owner, ownerField: "createdBy", operations: [create, update, delete] }
+  ]){
+  id: ID!
+  createdBy: ID!
+  creator: Profile @connection(fields: ["createdBy"])
+  parentId: ID!
+  content: String! #max length of entire item in DynamoDB is 400 KB. If we want longer page which is going beyond the item size then we need to use S3 and path here. This need more R&D. We would like to set a character limit for page anyways
+  illustration: String #S3 link
+  storyId: ID!
+  disallowNext: Boolean #stop others from extending the story via another page
+  disallowAlternate: Boolean #stop others from providing an alternative to this page
+  nextPage: [Page] @connection(keyName: "byParent", fields: ["id"])
+  story: Story @connection(fields: ["storyId"])
+  comments: [Comment] @connection(keyName: "byPage", fields: ["id"])
+  reactors: [Reactions] @connection(keyName: "byPost", fields: ["id"])
+}
+
+type Comment implements Post 
+  @model 
+  @key(name: "byPage", fields: ["pageId", "content"])
+  @key(name: "byCreator", fields: ["createdBy"]) 
+  @auth(rules: [
+    { allow: public, operations: [read], provider: iam }
+    { allow: owner, ownerField: "createdBy", operations: [create, update, delete] }
+  ]){
+  id: ID!
+  pageId: ID!
+  page: Page @connection(fields: ["pageId"])
+  content: String!
+  createdBy: ID!
+  creator: Profile @connection(fields: ["createdBy"])
+  reactors: [Reactions] @connection(keyName: "byPost", fields: ["id"])
+}
+
+type Character implements Post 
+  @model 
+  @key(name: "byUniverse", fields: ["universeId"])
+  @key(name: "byCreator", fields: ["createdBy"]) 
+  @auth(rules: [
+    { allow: public, operations: [read], provider: iam }
+    { allow: owner, ownerField: "createdBy", operations: [create, update, delete] }
+  ]){
+  id: ID!
+  createdBy: ID!
+  creator: Profile @connection(fields: ["createdBy"])
+  name: String!
+  image: String! #S3 link
+  universeId: [ID]!
+  appearsInUniverse: [Universe] @connection(fields: ["universeId"])
+  appearsInStories: [StoryCharacter] @connection(keyName: "byCharacter", fields: ["id"])
+  reactors: [Reactions] @connection(keyName: "byPost", fields: ["id"])
+}
+
+type StoryCharacter 
+  @model(queries: null)
+  @key(name: "byCharacter", fields: ["characterId", "storyId"])
+  @key(name: "byStory", fields: ["storyId", "characterId"]) 
+  @auth(rules: [
+    { allow: public, operations: [read], provider: iam }
+    { allow: owner, operations: [create, update, delete] }
+  ]){
+  id: ID!
+  storyId: ID!
+  characterId: ID!
+  story: Story! @connection(fields: ["storyId"])
+  character: Character! @connection(fields: ["characterId"])
+}

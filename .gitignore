@@ -9,6 +9,7 @@
 .history
 .svn/
 migrate_working_dir/
+node_modules
 
 # IntelliJ related
 *.iml
@@ -162,3 +163,4 @@ lib/firebase_options.dart
 pubspec.lock
 pubspec.lock
 server/functions/firebase_options.json
+server/data.yaml
